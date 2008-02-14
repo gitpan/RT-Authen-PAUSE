@@ -1,0 +1,71 @@
+<%ARGS>
+$user => undef
+$pass => undef
+</%ARGS>
+<%INIT>
+use LWP::UserAgent;
+use HTTP::Request;
+
+# somebody is logged in
+return if $session{'CurrentUser'};
+# no credentials
+return unless defined $user && defined $pass;
+# we don't auth root
+return if lc $user eq 'root';
+
+$user = uc $user;
+
+# Try to load the user by PAUSE_ID@cpan.org
+my $cu = RT::CurrentUser->new();
+$cu->LoadByName( $user );
+unless ( $cu->id ) {
+    $RT::Logger->warning("No user '$user' in DB, broken import of users from pause?");
+    return;
+}
+# we get the user, great
+
+# try to auth against local DB
+if ( $cu->IsPassword( $pass ) ) {
+    $session{'CurrentUser'} = $cu;
+    return;
+}
+
+# no luck with local try PAUSE's auth
+my $ua  = LWP::UserAgent->new();
+$ua->credentials('pause.perl.org:443', 'PAUSE', $user, $pass);
+
+my $req = HTTP::Request->new(GET => 'https://pause.perl.org/pause/authenquery');
+my $res = $ua->request($req);
+
+unless ( $res->code == 200 ) {
+    # if 401 then no dice, login failed... do we want to do something
+    # different here or just let it fall through to the default
+    # autohandler to error out?
+
+    # Other code => oops, PAUSE is down, or something
+    return;
+}
+
+# Successful login
+$session{'CurrentUser'} = $cu;
+
+# we'll cache the password, but we'll use system user as the current
+# user may have no right to modify his own password
+my $user_obj = RT::User->new( $RT::SystemUser );
+$user_obj->Load( $cu->id );
+unless ( $user_obj->id ) {
+    $RT::Logger->crit("Couldn't load user #". $cu->id);
+    return;
+}
+
+my ($status, $msg) = $user_obj->SetPassword( $pass );
+unless ( $status ) {
+    $RT::Logger->error(
+        "Couldn't set users password: $msg."
+        ." Next time we'll have to ask PAUSE service again"
+    );
+} else {
+    $RT::Logger->debug("Updated ". $user ."'s password with one from PAUSE");
+}
+
+</%INIT>
